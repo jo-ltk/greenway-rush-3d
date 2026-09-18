@@ -1,60 +1,410 @@
 import './style.css';
-import { flavorPickerMarkup } from './app/flavor-picker.ts';
+import { startGame, GameRuntime, type GameState } from './app/runtime.ts';
 
-document.querySelector<HTMLDivElement>('#app')!.innerHTML=`
-  <main id="viewport" aria-label="Jelly baby playground"></main>
-  <header class="masthead"><span class="eyebrow">a small, soft world</span><h1>jelly baby<span>.</span></h1></header>
-  <nav class="actions" aria-label="Game controls">
-    <button id="sound" class="icon-button" aria-label="Mute sound" aria-pressed="false" title="Sound">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path class="sound-waves" d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/><path class="sound-off" d="m15 9 6 6m0-6-6 6"/></svg>
-    </button>
-    <button id="reset" class="icon-button" aria-label="Reset jelly baby" title="Reset">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4.5 8a8 8 0 1 1-.1 8M4 3v6h6"/></svg>
-    </button>
-    ${flavorPickerMarkup()}
-    <button id="lighting-mode" class="icon-button" type="button" aria-label="Switch to night mode" aria-pressed="false" title="Switch to night mode">
-      <svg class="day-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
-      <svg class="night-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20.5 14A8.5 8.5 0 0 1 10 3.5 8.5 8.5 0 1 0 20.5 14Z"/></svg>
-    </button>
-  </nav>
-  <footer class="desktop-hints" aria-label="Keyboard controls">
-    <span><kbd>W</kbd><span class="key-row"><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span></span><span class="hint-label">wander</span>
-    <span class="separator"></span><kbd class="space-key">space</kbd><span class="hint-label">hop</span>
-    <span class="separator"></span><svg class="mouse" viewBox="0 0 20 25" fill="none" stroke="currentColor"><rect x="3.5" y="1.5" width="13" height="21" rx="6.5"/><path d="M10 5v5"/></svg><span class="hint-label">orbit · grab</span>
-  </footer>
-  <div class="touch-controls" aria-label="Touch controls">
-    <button class="joystick" data-joystick type="button" aria-label="Move">
-      <span class="joystick-track" aria-hidden="true"></span>
-      <span class="joystick-knob" aria-hidden="true"></span>
-    </button>
-    <button class="jump" data-control="Space" aria-label="Jump"><svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 21V6m-6 6 6-6 6 6M6 24h16"/></svg><span>hop</span></button>
+const appEl = document.querySelector<HTMLDivElement>('#app')!;
+
+appEl.innerHTML = `
+  <div id="viewport"></div>
+
+  <!-- ═══════════════════════════════════════════ IN-GAME HUD ══ -->
+  <div id="hud" class="hud-layer hidden">
+    <header class="hud-top-bar">
+      <!-- Track info (top-left) -->
+      <div class="track-badge">
+        <span id="hud-track-num" class="track-num">TRACK 01</span>
+        <span id="hud-track-title" class="track-title">Sunny Meadow</span>
+      </div>
+
+      <!-- Stats (top-center) -->
+      <div class="hud-stats-center">
+        <div class="stat-chip">
+          <span class="stat-icon">🪙</span>
+          <span id="hud-tokens" class="stat-val">0 / 10</span>
+        </div>
+        <div class="stat-chip">
+          <span class="stat-icon">⏱</span>
+          <span id="hud-timer" class="stat-val mono">00:00.0</span>
+        </div>
+        <div class="stat-chip best-chip">
+          <span class="stat-icon">🏆</span>
+          <span id="hud-best" class="stat-val mono">--:--.--</span>
+        </div>
+      </div>
+
+      <!-- Buttons (top-right) -->
+      <div class="action-buttons">
+        <button id="btn-mute" class="icon-btn" title="Toggle Sound" aria-label="Toggle Sound">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path id="sound-waves" d="M15.5 8.5a5 5 0 0 1 0 7m3-10a9 9 0 0 1 0 13"/></svg>
+        </button>
+        <button id="btn-reset" class="icon-btn" title="Respawn (R)" aria-label="Respawn">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
+        <button id="btn-pause" class="icon-btn" title="Pause (Esc)" aria-label="Pause">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Speedometer (bottom-left) -->
+    <div class="speedometer">
+      <span id="hud-speed" class="speed-number">0</span>
+      <span class="speed-unit">km/h</span>
+    </div>
+
+    <!-- Boost flash overlay -->
+    <div id="boost-flash" class="boost-flash"></div>
+
+    <!-- Checkpoint toast -->
+    <div id="checkpoint-toast" class="checkpoint-toast">
+      <span>✓</span>
+      <span>CHECKPOINT!</span>
+    </div>
+
+    <!-- Respawn toast -->
+    <div id="respawn-toast" class="respawn-toast">
+      <span>⚠ RESPAWNING...</span>
+    </div>
+
+    <!-- Controls hint (bottom-center) -->
+    <footer class="controls-hint">
+      <div class="hint-group"><kbd>W</kbd><kbd>S</kbd><span class="hint-label">Gas / Reverse</span></div>
+      <span class="hint-sep"></span>
+      <div class="hint-group"><kbd>A</kbd><kbd>D</kbd><span class="hint-label">Steer</span></div>
+      <span class="hint-sep"></span>
+      <div class="hint-group"><kbd>SPACE</kbd><span class="hint-label">Brake</span></div>
+      <span class="hint-sep"></span>
+      <div class="hint-group"><kbd>R</kbd><span class="hint-label">Respawn</span></div>
+    </footer>
   </div>
-  <section id="loading" role="status" aria-live="polite"><div class="loading-card"><div class="jelly-mark"></div><h2>A little life.</h2><p id="load-message">Warming up the world</p><pre id="fatal" hidden></pre><button id="retry" hidden>Try again</button></div></section>
+
+  <!-- ═══════════════════════════════════ COUNTDOWN OVERLAY ══ -->
+  <div id="overlay-countdown" class="countdown-overlay hidden">
+    <div id="countdown-number" class="countdown-number">3</div>
+  </div>
+
+  <!-- ═══════════════════════════════════ TOUCH CONTROLS ══ -->
+  <div class="touch-controls">
+    <button class="joystick" data-joystick type="button" aria-label="Steer">
+      <span class="joystick-track"></span>
+      <span class="joystick-knob"></span>
+    </button>
+    <button class="brake-btn" data-control="Space" type="button" aria-label="Brake">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5"><path d="M19 12H5"/><path d="M12 5l-7 7 7 7"/></svg>
+      <span>BRAKE</span>
+    </button>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ MAIN MENU ══ -->
+  <div id="modal-menu" class="modal-backdrop active">
+    <div class="menu-card">
+      <!-- Racing logo -->
+      <div class="brand-logo">
+        <div class="logo-car">🏎️</div>
+      </div>
+      <h1 class="game-title">GREENWAY<br><span class="title-accent">RUSH</span></h1>
+      <p class="menu-tagline">Pick your track and start the race!</p>
+
+      <!-- Track selector -->
+      <div class="track-selector">
+        <button class="track-card active" data-level="0" id="track-btn-0">
+          <span class="track-card-icon">🌻</span>
+          <div class="track-card-info">
+            <span class="track-card-name">Sunny Meadow</span>
+            <span class="track-card-diff easy">Easy</span>
+          </div>
+        </button>
+        <button class="track-card" data-level="1" id="track-btn-1">
+          <span class="track-card-icon">🌲</span>
+          <div class="track-card-info">
+            <span class="track-card-name">Forest Sprint</span>
+            <span class="track-card-diff medium">Medium</span>
+          </div>
+        </button>
+        <button class="track-card" data-level="2" id="track-btn-2">
+          <span class="track-card-icon">🏔️</span>
+          <div class="track-card-info">
+            <span class="track-card-name">Golden Ridge</span>
+            <span class="track-card-diff hard">Hard</span>
+          </div>
+        </button>
+      </div>
+
+      <button id="btn-start" class="btn-primary btn-green">🚀 START RACE</button>
+
+      <details class="how-to-play">
+        <summary>How to Play</summary>
+        <ul class="controls-list">
+          <li><kbd>W / S</kbd> Accelerate / Reverse</li>
+          <li><kbd>A / D</kbd> Steer left / right</li>
+          <li><kbd>SPACE</kbd> Brake / handbrake drift</li>
+          <li><kbd>R</kbd> Respawn at checkpoint</li>
+          <li>🟡 Collect yellow tokens for bonus score</li>
+          <li>🟠 Hit orange boost pads for speed boost!</li>
+          <li>🏁 Reach the finish line as fast as you can!</li>
+        </ul>
+      </details>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ PAUSE MODAL ══ -->
+  <div id="modal-pause" class="modal-backdrop">
+    <div class="menu-card compact">
+      <h2 class="card-title">⏸ PAUSED</h2>
+      <button id="btn-resume" class="btn-primary btn-green">▶ Resume</button>
+      <button id="btn-restart-level" class="btn-secondary">↺ Restart Track</button>
+      <button id="btn-pause-menu" class="btn-secondary">🏠 Main Menu</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════ LEVEL COMPLETE MODAL ══ -->
+  <div id="modal-complete" class="modal-backdrop">
+    <div class="menu-card">
+      <div id="complete-medal" class="medal gold">🥇</div>
+      <h2 class="card-title">TRACK COMPLETE!</h2>
+      <div class="result-grid">
+        <div class="result-card">
+          <span class="result-label">Your Time</span>
+          <span id="complete-time" class="result-val mono">00:00.0</span>
+        </div>
+        <div class="result-card">
+          <span class="result-label">Tokens</span>
+          <span id="complete-tokens" class="result-val">0 / 0</span>
+        </div>
+        <div class="result-card">
+          <span class="result-label">Best Time</span>
+          <span id="complete-best" class="result-val mono">--:--.--</span>
+        </div>
+        <div class="result-card">
+          <span class="result-label">Gold Target</span>
+          <span id="complete-gold" class="result-val gold-text mono">--:--.--</span>
+        </div>
+      </div>
+      <button id="btn-next-level" class="btn-primary btn-green">Next Track ▶</button>
+      <button id="btn-complete-menu" class="btn-secondary">🏠 Main Menu</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════ GAME WON MODAL ══ -->
+  <div id="modal-victory" class="modal-backdrop">
+    <div class="menu-card">
+      <div class="medal gold big">🏆</div>
+      <h2 class="card-title">ALL TRACKS COMPLETE!</h2>
+      <p class="menu-tagline">Amazing racing! You conquered all three tracks!</p>
+      <div class="result-grid">
+        <div class="result-card">
+          <span class="result-label">Total Time</span>
+          <span id="victory-time" class="result-val mono">00:00.0</span>
+        </div>
+        <div class="result-card">
+          <span class="result-label">Tokens</span>
+          <span id="victory-tokens" class="result-val">0</span>
+        </div>
+      </div>
+      <button id="btn-replay" class="btn-primary btn-green">🔄 Play Again</button>
+    </div>
+  </div>
 `;
 
-let stage='Loading the game',failed=false,game:{stop:()=>void}|undefined;
-function fail(reason:unknown) {
-  if(failed)return;failed=true;game?.stop();
-  const error=reason instanceof Error?reason:new Error(String(reason));
-  document.querySelector('#loading')!.classList.remove('hidden');
-  document.querySelector('#loading')!.classList.add('failed');
-  document.querySelector('h2')!.textContent='A little hiccup.';
-  document.querySelector('#load-message')!.textContent='The game couldn’t start. Details below.';
-  const fatal=document.querySelector<HTMLPreElement>('#fatal')!;fatal.hidden=false;
-  fatal.textContent=`${stage}\n${error.message}\n\nViewport: ${innerWidth} × ${innerHeight} · DPR ${devicePixelRatio}\n${navigator.userAgent}`;
-  document.querySelector<HTMLButtonElement>('#retry')!.hidden=false;
-  console.error(`[Jelly Baby / ${stage}]`,error);
-}
-window.addEventListener('error',event=>fail(event.error||event.message));
-window.addEventListener('unhandledrejection',event=>fail(event.reason));
-document.querySelector('#retry')!.addEventListener('click',()=>location.reload());
+// ─── DOM Elements ─────────────────────────────────────────────────────────────
+const hudEl = document.querySelector<HTMLDivElement>('#hud')!;
+const trackNumEl = document.querySelector<HTMLSpanElement>('#hud-track-num')!;
+const trackTitleEl = document.querySelector<HTMLSpanElement>('#hud-track-title')!;
+const tokensEl = document.querySelector<HTMLSpanElement>('#hud-tokens')!;
+const timerEl = document.querySelector<HTMLSpanElement>('#hud-timer')!;
+const bestEl = document.querySelector<HTMLSpanElement>('#hud-best')!;
+const speedEl = document.querySelector<HTMLSpanElement>('#hud-speed')!;
+const boostFlash = document.querySelector<HTMLDivElement>('#boost-flash')!;
+const checkpointToast = document.querySelector<HTMLDivElement>('#checkpoint-toast')!;
+const respawnToast = document.querySelector<HTMLDivElement>('#respawn-toast')!;
+const countdownOverlay = document.querySelector<HTMLDivElement>('#overlay-countdown')!;
+const countdownNumber = document.querySelector<HTMLDivElement>('#countdown-number')!;
 
-// One observed chain covers imports, initialization, compilation, warmup and first render.
-void import('./app/runtime.ts').then(({startGame})=>startGame(message=>{
-  if(failed)throw new Error('Startup aborted after a GPU failure');
-  stage=message;document.querySelector('#load-message')!.textContent=message;
-},fail)).then(started=>{
-  game=started;
-  if(failed){game.stop();return;}
-  stage='Playing';document.querySelector('#loading')!.classList.add('hidden');
-}).catch(fail);
+const modalMenu = document.querySelector<HTMLDivElement>('#modal-menu')!;
+const modalPause = document.querySelector<HTMLDivElement>('#modal-pause')!;
+const modalComplete = document.querySelector<HTMLDivElement>('#modal-complete')!;
+const modalVictory = document.querySelector<HTMLDivElement>('#modal-victory')!;
+
+const btnStart = document.querySelector<HTMLButtonElement>('#btn-start')!;
+const btnResume = document.querySelector<HTMLButtonElement>('#btn-resume')!;
+const btnRestartLevel = document.querySelector<HTMLButtonElement>('#btn-restart-level')!;
+const btnPauseMenu = document.querySelector<HTMLButtonElement>('#btn-pause-menu')!;
+const btnNextLevel = document.querySelector<HTMLButtonElement>('#btn-next-level')!;
+const btnCompleteMenu = document.querySelector<HTMLButtonElement>('#btn-complete-menu')!;
+const btnReplay = document.querySelector<HTMLButtonElement>('#btn-replay')!;
+const btnMute = document.querySelector<HTMLButtonElement>('#btn-mute')!;
+const btnReset = document.querySelector<HTMLButtonElement>('#btn-reset')!;
+const btnPause = document.querySelector<HTMLButtonElement>('#btn-pause')!;
+const trackBtns = document.querySelectorAll<HTMLButtonElement>('.track-card');
+
+let selectedLevel = 0;
+let toastTimeout: number | null = null;
+let respawnTimeout: number | null = null;
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 10);
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
+}
+
+function getMedalForTime(time: number, goldTime: number, silverTime: number): { emoji: string; cls: string } {
+  if (time <= goldTime) return { emoji: '🥇', cls: 'gold' };
+  if (time <= silverTime) return { emoji: '🥈', cls: 'silver' };
+  return { emoji: '🥉', cls: 'bronze' };
+}
+
+// ─── Initialize Game ──────────────────────────────────────────────────────────
+let game: GameRuntime | null = null;
+
+game = startGame(document.querySelector<HTMLElement>('#viewport')!, {
+  onTokenUpdate: (collected, total) => {
+    tokensEl.textContent = `${collected} / ${total}`;
+  },
+  onTimeUpdate: (sec) => {
+    timerEl.textContent = formatTime(sec);
+  },
+  onSpeedUpdate: (kmh) => {
+    speedEl.textContent = String(Math.round(kmh));
+  },
+  onBestTimeUpdate: (secs) => {
+    bestEl.textContent = secs !== null ? formatTime(secs) : '--:--.--';
+  },
+  onTrackLoaded: (idx, trackName, title, _diff) => {
+    selectedLevel = idx;
+    trackNumEl.textContent = trackName;
+    trackTitleEl.textContent = title;
+    trackBtns.forEach((btn, bIdx) => {
+      btn.classList.toggle('active', bIdx === idx);
+    });
+  },
+  onCheckpointTriggered: () => {
+    if (toastTimeout !== null) clearTimeout(toastTimeout);
+    checkpointToast.classList.add('active');
+    toastTimeout = window.setTimeout(() => {
+      checkpointToast.classList.remove('active');
+      toastTimeout = null;
+    }, 2200);
+  },
+  onCountdown: (n) => {
+    countdownOverlay.classList.remove('hidden');
+    if (n > 0) {
+      countdownNumber.textContent = String(n);
+      countdownNumber.className = 'countdown-number';
+      void countdownNumber.offsetWidth; // reflow
+      countdownNumber.classList.add('pop');
+    } else {
+      countdownNumber.textContent = 'GO!';
+      countdownNumber.className = 'countdown-number go';
+      void countdownNumber.offsetWidth;
+      countdownNumber.classList.add('pop');
+      window.setTimeout(() => {
+        countdownOverlay.classList.add('hidden');
+      }, 800);
+    }
+  },
+  onLevelComplete: (stats) => {
+    const medal = getMedalForTime(stats.time, stats.goldTime, stats.silverTime);
+    const medalEl = document.querySelector<HTMLDivElement>('#complete-medal')!;
+    medalEl.textContent = medal.emoji;
+    medalEl.className = `medal ${medal.cls}`;
+    document.querySelector<HTMLSpanElement>('#complete-time')!.textContent = formatTime(stats.time);
+    document.querySelector<HTMLSpanElement>('#complete-tokens')!.textContent = `${stats.tokens} / ${stats.totalTokens}`;
+    document.querySelector<HTMLSpanElement>('#complete-best')!.textContent = stats.bestTime !== null ? formatTime(stats.bestTime) : '--:--.--';
+    document.querySelector<HTMLSpanElement>('#complete-gold')!.textContent = formatTime(stats.goldTime);
+    modalComplete.classList.add('active');
+  },
+  onGameWon: (stats) => {
+    document.querySelector<HTMLSpanElement>('#victory-time')!.textContent = formatTime(stats.totalTime);
+    document.querySelector<HTMLSpanElement>('#victory-tokens')!.textContent = String(stats.totalTokens);
+    modalVictory.classList.add('active');
+  },
+  onBoostActive: (active) => {
+    if (active) {
+      boostFlash.classList.add('active');
+      window.setTimeout(() => boostFlash.classList.remove('active'), 600);
+    }
+  },
+  onRespawn: () => {
+    if (respawnTimeout !== null) clearTimeout(respawnTimeout);
+    respawnToast.classList.add('active');
+    respawnTimeout = window.setTimeout(() => {
+      respawnToast.classList.remove('active');
+      respawnTimeout = null;
+    }, 1500);
+  },
+  onStateChange: (state: GameState) => {
+    hudEl.classList.toggle('hidden', state === 'MENU');
+    countdownOverlay.classList.toggle('hidden', state !== 'COUNTDOWN');
+    modalMenu.classList.toggle('active', state === 'MENU');
+    modalPause.classList.toggle('active', state === 'PAUSED');
+    modalComplete.classList.toggle('active', state === 'LEVEL_COMPLETE');
+    modalVictory.classList.toggle('active', state === 'GAME_WON');
+  },
+});
+
+// ─── Track selector ───────────────────────────────────────────────────────────
+trackBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const lvl = parseInt(btn.dataset.level || '0', 10);
+    selectedLevel = lvl;
+    trackBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    game?.loadLevel(lvl);
+  });
+});
+
+// ─── Button actions ───────────────────────────────────────────────────────────
+btnStart.addEventListener('click', () => {
+  game?.loadLevel(selectedLevel);
+  game?.startPlay();
+});
+
+btnResume.addEventListener('click', () => {
+  game?.resumeGame();
+});
+
+btnRestartLevel.addEventListener('click', () => {
+  modalPause.classList.remove('active');
+  game?.restartCurrentLevel();
+});
+
+btnPauseMenu.addEventListener('click', () => {
+  modalPause.classList.remove('active');
+  game?.setState('MENU');
+});
+
+btnNextLevel.addEventListener('click', () => {
+  modalComplete.classList.remove('active');
+  game?.nextLevel();
+});
+
+btnCompleteMenu.addEventListener('click', () => {
+  modalComplete.classList.remove('active');
+  game?.setState('MENU');
+});
+
+btnReplay.addEventListener('click', () => {
+  modalVictory.classList.remove('active');
+  selectedLevel = 0;
+  game?.loadLevel(0);
+  game?.startPlay();
+});
+
+btnMute.addEventListener('click', () => {
+  if (!game) return;
+  const muted = game.sound.toggleMute();
+  const waves = document.querySelector('#sound-waves');
+  if (waves) (waves as SVGPathElement).style.display = muted ? 'none' : 'block';
+});
+
+btnReset.addEventListener('click', () => {
+  if (game && game.state === 'PLAYING') {
+    game.physics.reset(game.physics.lastSafePosition, game.physics.lastSafeHeading);
+  }
+});
+
+btnPause.addEventListener('click', () => {
+  if (!game) return;
+  if (game.state === 'PLAYING') game.pauseGame();
+  else if (game.state === 'PAUSED') game.resumeGame();
+});

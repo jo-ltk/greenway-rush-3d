@@ -1,218 +1,443 @@
-import * as THREE from 'three/webgpu';
-import { SoftBody } from '../physics/soft-body.js';
-import { PHYS } from '../physics/constants.js';
-import { loadBabyCage } from '../physics/baby-cage.ts';
-import { RefractiveLightField } from '../graphics/optics/refractive-light.js';
-import { CausticReceivers } from '../graphics/optics/caustic-receivers.ts';
-import { Baby, ABSORPTION } from '../graphics/character/baby.ts';
-import { loadEnvironment } from '../graphics/scene/environment.ts';
-import { loadTableTextures, makeTable } from '../graphics/scene/table.ts';
-import { Locomotion } from './locomotion.ts';
-import { Input } from './input.ts';
-import { JellySound } from './sound.ts';
-import { createRenderer, resizeView } from '../graphics/scene/renderer.ts';
-import { OpticalTransport } from '../graphics/optics/transport.ts';
-import { createComposite } from '../graphics/scene/composite.ts';
-import { FixedStepper } from './fixed-step.ts';
-import { JELLY_FLAVORS } from '../graphics/character/jelly-flavors.ts';
-import { FlavorPicker } from './flavor-picker.ts';
-import { Facilities } from '../facilities/manager.ts';
-import { SwingFacility } from '../worlds/main/facilities/swing/facility.ts';
-import { FacilityShadows } from '../facilities/shadows.ts';
-import { LightingMode } from './lighting-mode.ts';
-import { BedFacility } from '../worlds/main/facilities/bed/facility.ts';
-import { TrampolineFacility } from '../worlds/main/facilities/trampoline/facility.ts';
-import { CarriedWearableFacility, WearableFacility } from '../worlds/main/facilities/wearable/facility.ts';
-import { warmMainScenePipelines } from '../graphics/scene/render-warmup.ts';
-import { WorldTravel } from '../worlds/travel.ts';
-import { SOCCER_RUN_CADENCE_SCALE, SOCCER_RUN_SPEED_SCALE } from '../worlds/soccer/layout.ts';
-import { LocalReflectionProbe } from '../graphics/scene/local-reflections.ts';
-import { startupPlatformProfile } from './platform-profile.ts';
+import * as THREE from 'three';
+import { createRenderer, handleResize } from '../graphics/renderer.ts';
+import { CameraController } from '../graphics/camera-controller.ts';
+import { VehiclePhysics } from '../physics/vehicle-physics.ts';
+import { VehicleMesh } from '../graphics/vehicle-mesh.ts';
+import { ParticleSystem } from '../graphics/particles.ts';
+import { LevelManager } from '../levels/level-manager.ts';
+import { SoundSystem } from '../audio/synth.ts';
+import { InputManager } from './input.ts';
 
-export async function startGame(stage:(s:string)=>void,fail:(e:unknown)=>void) {
-  const profile=startupPlatformProfile();
-  stage('Starting WebGPU');
-  const renderer=await createRenderer(fail);
-  document.querySelector('#viewport')!.appendChild(renderer.domElement);
-  // Construct audio before the remaining async scene work so the first mobile
-  // gesture can unlock Web Audio even while assets and shaders are settling.
-  const sound=new JellySound();
-  const scene=new THREE.Scene();
-  scene.background=new THREE.Color('#e8d9c3');scene.fog=new THREE.Fog('#e8d9c3',2,12);
-  const camera=new THREE.PerspectiveCamera(36,1,.001,40);
-  camera.position.set(.111,.170,.256);
-  stage('Loading the little room');
-  const [environment,nightEnvironment,cage,tableTextures]=await Promise.all([
-    loadEnvironment(renderer,scene),loadEnvironment(renderer,scene,true),loadBabyCage(),loadTableTextures(profile.mobile),
-  ]);
-  // Start the large table uploads before CPU-side world construction so the
-  // backend can overlap transfer work with geometry/physics setup.
-  for(const texture of Object.values(tableTextures))renderer.initTexture(texture);
-  stage('Making a little jelly');
-  const body=new SoftBody(cage);
-  const baby=new Baby(body);scene.add(baby.group);
-  const localReflections=new LocalReflectionProbe(scene,baby.group,environment.reflectionTexture,profile.reflectionFacesPerFrame);
-  baby.setReflectionMap(localReflections.texture,environment.intensity);
-  const optics=new RefractiveLightField(body.cage.opticalSurface,environment.incoming,ABSORPTION);
-  optics.setCamera(camera);
-  // Worker BVH construction is independent of the remaining scene setup. Start
-  // it here so that cold worker initialization runs in parallel with facilities.
-  const transport=new OpticalTransport(optics,body,camera,environment.incoming,fail,profile.cameraOnlyOpticalHz);
-  const caustics=new CausticReceivers(optics,environment);
-  const facilityShadows=new FacilityShadows(environment.incoming,environment.windowFraction,caustics,-.00005,profile.surfaceShadowSize);
-  facilityShadows.surfaces.addBaby(baby.mesh);
-  const table=makeTable(optics,environment,facilityShadows,caustics,tableTextures);scene.add(table.mesh);
-  const composite=createComposite(renderer,scene,camera,profile.bloomResolutionScale);
-  const rig=new Locomotion(body);
-  const facilities=new Facilities(body);
-  const worlds=new WorldTravel(scene,body,facilityShadows,facilities,renderer,camera,stage,fail,profile.cameraOnlyOpticalHz);
-  const wearableTable=new WearableFacility(worlds.home,body,baby.group,rig,facilityShadows);
-  const bed=new BedFacility(worlds.home,body,facilityShadows);
-  rig.onJump=()=>{
-    wearableTable.jumpFromNormalLocomotion();
-    if(worlds.inSoccer&&(worlds.soccer?.physics.onField??false))sound.soccerGrassContact('takeoff');
-  };
-  facilities.add(wearableTable);
-  worlds.toyFacilities.add(new CarriedWearableFacility(wearableTable));
-  worlds.soccerFacilities.add(new CarriedWearableFacility(wearableTable));
-  facilities.add(new SwingFacility(worlds.home,body,facilityShadows,sound.facility));
-  facilities.add(new TrampolineFacility(worlds.home,body,facilityShadows,sound.facility));
-  facilities.add(bed);
-  const flavorPicker=new FlavorPicker(flavor=>{
-    baby.setFlavor(flavor);optics.setAbsorption(JELLY_FLAVORS[flavor].absorption);
-  });
-  rig.onContact=(speed,foot)=>{
-    const soccerField=worlds.inSoccer&&(worlds.soccer?.physics.onField??false);
-    if(soccerField){if(!foot)sound.soccerGrassContact('land');return;}
-    sound.contact(speed,foot);
-  };
-  const physicsClock=new FixedStepper(PHYS.step);
-  let lastTime=0,disposed=false;
-  const reset=()=>{if(worlds.loading)return;sound.stopFacilities();worlds.reset();input.teleport();rig.yaw=worlds.arrivalYaw;baby.resetFace();physicsClock.reset();};
-  const input=new Input(camera,renderer.domElement,body,baby.mesh,rig,sound);
-  input.bodyControlled=()=>worlds.loading||worlds.menu.opened||!!worlds.facilities.active;
-  input.menuOpen=()=>worlds.menu.opened;
-  input.soccerOnField=()=>worlds.inSoccer&&(worlds.soccer?.physics.onField??false);
-  input.soccerCameraObstacles=()=>worlds.inSoccer&&(worlds.soccer?.physics.onField??false)?worlds.soccer?.stadium.cameraObstacles??[]:[];
-  input.facilityCameraDistance=()=>worlds.facilities.active?.cameraDistance;
-  input.vehicleInput=(throttle,turn)=>{const p=worlds.tricycle?.physics;if(p&&worlds.inToys){p.throttle=p.riding?throttle:0;p.turn=p.riding?turn:0;}};
-  input.ridingVehicle=()=>worlds.inToys&&(worlds.tricycle?.physics.riding??false);
-  input.vehicleHeading=()=>worlds.tricycle?.physics.yaw;
-  facilities.onInteract=()=>{input.clear();rig.reset();void sound.unlock().catch(()=>{});};
-  worlds.toyFacilities.onInteract=facilities.onInteract;
-  worlds.soccerFacilities.onInteract=facilities.onInteract;
-  worlds.onMenuClose=()=>input.clear();
-  worlds.onMove=()=>{input.clear();sound.stopFacilities();physicsClock.reset();};
-  worlds.onMenuOpen=worlds.onMove;
-  worlds.onReady=async()=>{
-    input.teleport();rig.yaw=worlds.arrivalYaw;baby.resetFace();physicsClock.reset();
-    sound.prepareWorld(worlds.current);
-    if(worlds.tricycle){
-      worlds.tricycle.physics.onCrash=speed=>sound.contact(speed,false);
-      worlds.tricycle.onWalkCurbImpact=speed=>rig.surfaceImpact(speed);
-    }
-    if(worlds.soccer)worlds.soccer.physics.onEvent=(kind,strength,p)=>sound.soccerEvent(kind,strength,p);
-    baby.update();optics.update(renderer,body,true);transport.follow();await transport.update();
-    localReflections.captureNow(renderer,body.center);
-  };
-  const lightingMode=new LightingMode(renderer,scene,camera,environment,nightEnvironment,async(light,signal)=>{
-    optics.setLightDirection(light.incoming);
-    facilityShadows.setLighting(light.incoming,light.windowFraction);caustics.setLighting(light);table.setLighting(light);
-    localReflections.setEnvironment(light.reflectionTexture);baby.setReflectionMap(localReflections.texture,light.intensity);
-    // Refresh every visible derivative while the animation loop holds the last
-    // coherent frame. Worker and GPU work overlap where their dependencies allow.
-    const transportReady=transport.refreshLighting(light.incoming);
-    const shadowSyncRevision=facilityShadows.update(renderer);
-    facilityShadows.surfaces.update(renderer,shadowSyncRevision);
-    optics.update(renderer,body,true);
-    const soccerReady=worlds.soccer?.prepareLighting(renderer,worlds.inSoccer)??Promise.resolve();
-    await Promise.all([transportReady,soccerReady]);
-    if(signal.aborted)return;
-    transport.follow();localReflections.captureNow(renderer,body.center);
-  },()=>composite.render(),fail);
-  const resize=()=>resizeView(renderer,camera,input.controls,profile.maxDpr);
-  let resizeFrame=0;
-  const resizeObserver=new ResizeObserver(()=>{
-    cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(resize);
-  });
-  resizeObserver.observe(document.querySelector('#viewport')!);resize();
-  document.querySelector('#reset')!.addEventListener('click',event=>{
-    reset();if((event as MouseEvent).detail>0)(event.currentTarget as HTMLButtonElement).blur();
-  });
-  document.querySelector('#sound')!.addEventListener('click',event=>{
-    const muted=sound.toggle(),button=document.querySelector('#sound')!;
-    button.setAttribute('aria-pressed',String(muted));button.setAttribute('aria-label',muted?'Enable sound':'Mute sound');
-    button.classList.toggle('muted',muted);void sound.unlock().catch(()=>{});
-    if((event as MouseEvent).detail>0)(event.currentTarget as HTMLButtonElement).blur();
-  });
-  stage('Settling in');
-  // Let contact establish itself before displaying the first frame.
-  for(let i=0;i<80;i++){rig.step(PHYS.step);body.step(PHYS.step);}
-  body.updateSurface();
-  stage('Warming collisions');
-  facilities.warmupCollisions();
-  baby.update();input.update(1);
-  const shadowSyncRevision=facilityShadows.update(renderer);
-  facilityShadows.surfaces.update(renderer,shadowSyncRevision);
-  optics.update(renderer,body,true);
-  await transport.update();
-  localReflections.captureNow(renderer,body.center);
-  stage('Compiling the material');
-  await warmMainScenePipelines(renderer,scene,camera);
-  stage('Drawing the first frame');
-  composite.render();
-  // Fence first-frame GPU work so validation/OOM cannot masquerade as a successful boot.
-  const backend=renderer.backend as unknown as {device:GPUDevice};
-  await backend.device.queue.onSubmittedWorkDone();
-  lastTime=performance.now();
-  const frame=(time:number)=>{
-    if(disposed)return;
-    try {
-      const dt=Math.min(.05,Math.max(0,(time-lastTime)/1000));lastTime=time;
-      if(document.hidden){physicsClock.reset();return;}
-      if(lightingMode.switching){physicsClock.reset();return;}
-      if(worlds.loading||worlds.menu.opened){physicsClock.reset();return;}
-      const steps=physicsClock.advance(dt,()=>{
-        if(worlds.loading)return;
-        const current=worlds.facilities;
-        const soccerField=worlds.inSoccer&&(worlds.soccer?.physics.onField??false);
-        rig.speedScale=soccerField?SOCCER_RUN_SPEED_SCALE:1;rig.cadenceScale=soccerField?SOCCER_RUN_CADENCE_SCALE:1;
-        input.step(PHYS.step);current.step(PHYS.step);
-        if(!current.active)rig.step(PHYS.step);
-        body.step(PHYS.step);wearableTable.syncBedOccupancy(bed.active);current.afterStep();input.afterPhysicsStep();
-        if(!current.active)rig.afterStep();
-        worlds.step(PHYS.step);
-      });
-      if(steps&&body.surfaceDirty) {
-        if(!body.isFinite())throw new Error('The soft-body simulation produced an invalid state');
-        body.updateSurface();
+export type GameState = 'MENU' | 'COUNTDOWN' | 'PLAYING' | 'PAUSED' | 'LEVEL_COMPLETE' | 'GAME_WON';
+
+export interface GameUIEvents {
+  onTokenUpdate: (collected: number, total: number) => void;
+  onTimeUpdate: (seconds: number) => void;
+  onSpeedUpdate: (kmh: number) => void;
+  onBestTimeUpdate: (seconds: number | null) => void;
+  onTrackLoaded: (index: number, trackName: string, title: string, difficulty: string) => void;
+  onCheckpointTriggered: () => void;
+  onCountdown: (n: number) => void; // 3, 2, 1, 0 = GO
+  onLevelComplete: (stats: { track: number; time: number; tokens: number; totalTokens: number; bestTime: number | null; goldTime: number; silverTime: number }) => void;
+  onGameWon: (stats: { totalTime: number; totalTokens: number }) => void;
+  onBoostActive: (active: boolean) => void;
+  onStateChange: (state: GameState) => void;
+  onRespawn: () => void;
+}
+
+export class GameRuntime {
+  public renderer: THREE.WebGLRenderer;
+  public scene: THREE.Scene;
+  public camera: THREE.PerspectiveCamera;
+  public cameraController: CameraController;
+
+  public sound: SoundSystem;
+  public input: InputManager;
+  public levelManager: LevelManager;
+  public particles: ParticleSystem;
+
+  public physics: VehiclePhysics;
+  public vehicleMesh: VehicleMesh;
+
+  public state: GameState = 'MENU';
+  public totalTokensInLevel: number = 0;
+  public collectedTokensInLevel: number = 0;
+  public raceTimer: number = 0;
+  public overallTimer: number = 0;
+  public totalTokensCollected: number = 0;
+
+  private isRunning: boolean = false;
+  private lastFrameTime: number = 0;
+  private uiEvents: GameUIEvents;
+
+  // Countdown state
+  private countdownTimer: number = 0;
+  private countdownStep: number = 3; // 3,2,1,0(GO)
+
+  // Drift/skid tracking
+  private lastSkidTime: number = 0;
+  private boostWasActive: boolean = false;
+
+  constructor(viewportEl: HTMLElement, uiEvents: GameUIEvents) {
+    this.uiEvents = uiEvents;
+
+    // 1. Scene & Atmosphere
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x87ceeb); // sky blue
+    this.scene.fog = new THREE.Fog(0xc8e8f0, 80, 200);
+
+    // 2. Camera & Renderer
+    const aspect = window.innerWidth / window.innerHeight;
+    this.camera = new THREE.PerspectiveCamera(52, aspect, 0.1, 300);
+    this.renderer = createRenderer();
+    viewportEl.appendChild(this.renderer.domElement);
+
+    this.cameraController = new CameraController(this.camera, this.renderer.domElement);
+
+    // 3. Natural Lighting
+    this.setupLighting();
+
+    // 4. Game Systems
+    this.sound = new SoundSystem();
+    this.input = new InputManager();
+    this.levelManager = new LevelManager();
+    this.scene.add(this.levelManager.group);
+
+    this.particles = new ParticleSystem();
+    this.scene.add(this.particles.group);
+
+    this.physics = new VehiclePhysics();
+    this.vehicleMesh = new VehicleMesh();
+    this.scene.add(this.vehicleMesh.group);
+
+    // 5. Physics Callbacks
+    this.setupPhysicsCallbacks();
+
+    // 6. Window Resize
+    window.addEventListener('resize', () => {
+      handleResize(this.renderer, this.camera);
+    });
+
+    // 7. Load first track for preview
+    this.loadLevel(0);
+  }
+
+  private setupLighting(): void {
+    // Warm ambient sky light
+    const ambientLight = new THREE.AmbientLight(0xfff4e0, 1.4);
+    this.scene.add(ambientLight);
+
+    // Main sun (warm directional)
+    const sunLight = new THREE.DirectionalLight(0xffe5b4, 2.8);
+    sunLight.position.set(30, 60, 20);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.near = 0.5;
+    sunLight.shadow.camera.far = 200;
+    sunLight.shadow.camera.left = -60;
+    sunLight.shadow.camera.right = 60;
+    sunLight.shadow.camera.top = 60;
+    sunLight.shadow.camera.bottom = -60;
+    sunLight.shadow.bias = -0.0004;
+    this.scene.add(sunLight);
+
+    // Sky bounce (cool blue fill from above)
+    const skyFill = new THREE.DirectionalLight(0xadd8e6, 0.7);
+    skyFill.position.set(-10, 30, -15);
+    this.scene.add(skyFill);
+
+    // Warm ground bounce
+    const groundBounce = new THREE.HemisphereLight(0x87ceeb, 0x5eb965, 0.5);
+    this.scene.add(groundBounce);
+  }
+
+  private setupPhysicsCallbacks(): void {
+    this.physics.callbacks = {
+      onCollect: (_id: string) => {
+        this.sound.playCollect();
+        this.particles.emitCollectBurst(this.physics.position);
+        this.collectedTokensInLevel++;
+        this.totalTokensCollected++;
+        this.uiEvents.onTokenUpdate(this.collectedTokensInLevel, this.totalTokensInLevel);
+      },
+      onCheckpoint: (_id: string, pos: THREE.Vector3) => {
+        this.sound.playCheckpoint();
+        this.uiEvents.onCheckpointTriggered();
+        // small celebration
+        this.particles.emitCollectBurst(pos);
+      },
+      onBoost: (_impulse: number) => {
+        this.sound.playBoost();
+      },
+      onHazard: () => {
+        this.sound.playHazard();
+        this.particles.emitRespawn(this.physics.position);
+        this.uiEvents.onRespawn();
+      },
+      onGoal: () => {
+        this.handleTrackComplete();
+      },
+      onLand: (impact: number) => {
+        this.sound.playLand(impact);
+        this.particles.emitLanding(this.physics.position, impact);
+        this.cameraController.triggerShake(impact);
+      },
+    };
+  }
+
+  public loadLevel(levelIndex: number): void {
+    const data = this.levelManager.loadLevel(levelIndex);
+    const spawn = new THREE.Vector3(...data.spawnPoint);
+
+    this.physics.reset(spawn, data.spawnHeading);
+    this.vehicleMesh.group.position.copy(spawn);
+    this.vehicleMesh.group.rotation.y = data.spawnHeading;
+    this.cameraController.snapTo(spawn, data.spawnHeading);
+
+    this.totalTokensInLevel = data.tokens.length;
+    this.collectedTokensInLevel = 0;
+    this.raceTimer = 0;
+
+    this.uiEvents.onTrackLoaded(levelIndex, data.trackName, data.trackTitle, data.difficulty);
+    this.uiEvents.onTokenUpdate(0, this.totalTokensInLevel);
+    this.uiEvents.onSpeedUpdate(0);
+
+    // Load best time from localStorage
+    const bestTime = this.getBestTime(levelIndex);
+    this.uiEvents.onBestTimeUpdate(bestTime);
+  }
+
+  public startPlay(): void {
+    this.sound.init();
+    this.sound.ensureContext();
+    this.startCountdown();
+  }
+
+  private startCountdown(): void {
+    this.setState('COUNTDOWN');
+    this.countdownStep = 3;
+    this.countdownTimer = 0;
+    this.uiEvents.onCountdown(3);
+    this.sound.playCountdownBeep(3);
+  }
+
+  private tickCountdown(dt: number): void {
+    this.countdownTimer += dt;
+    if (this.countdownTimer >= 1.0) {
+      this.countdownTimer -= 1.0;
+      this.countdownStep--;
+
+      if (this.countdownStep > 0) {
+        this.uiEvents.onCountdown(this.countdownStep);
+        this.sound.playCountdownBeep(this.countdownStep);
+      } else {
+        // GO!
+        this.uiEvents.onCountdown(0);
+        this.sound.playCountdownBeep(0);
+        this.setState('PLAYING');
       }
-      if(worlds.loading)return;
-      worlds.facilities.update();worlds.update(dt);
-      baby.update(dt,worlds.facilities.active?.laughing??false,worlds.facilities.active?.sleeping??false,worlds.facilities.crying);
-      const shadowSyncRevision=facilityShadows.update(renderer);
-      facilityShadows.surfaces.update(renderer,shadowSyncRevision);
-      input.update(dt);
-      sound.listen(camera);
-      const tricycle=worlds.inToys?worlds.tricycle?.physics:undefined;
-      if(tricycle)sound.tricycleMotion(tricycle.riding?tricycle.rollingSpeed:0,tricycle.position.x,tricycle.position.y+.025,tricycle.position.z);
-      const soccer=worlds.inSoccer?worlds.soccer?.physics:undefined;
-      if(soccer)sound.soccerMotion(soccer.onField&&rig.grounded&&rig.move.lengthSq()>.01?Math.hypot(rig.velocity.x,rig.velocity.z):0);
-      transport.follow();
-      optics.update(renderer,body);
-      table.mesh.position.x=body.center.x;table.mesh.position.z=body.center.z;
-      localReflections.update(renderer,body.center);
-      void transport.update().catch(fail);
-      composite.render();
-    }catch(error){fail(error);}
-  };
-  await renderer.setAnimationLoop(frame);
-  const dispose=()=>{
-    if(disposed)return;disposed=true;
-    lightingMode.dispose();void renderer.setAnimationLoop(null);input.dispose();sound.dispose();transport.dispose();resizeObserver.disconnect();cancelAnimationFrame(resizeFrame);
-    worlds.dispose();facilities.dispose();facilityShadows.dispose();caustics.dispose();flavorPicker.dispose();composite.dispose();localReflections.dispose();baby.dispose();table.dispose();environment.dispose();optics.dispose();renderer.dispose();
-  };
-  window.addEventListener('pagehide',event=>{if(!event.persisted)dispose();});
-  if(import.meta.hot)import.meta.hot.dispose(dispose);
-  return {stop:()=>{disposed=true;worlds.dispose();lightingMode.dispose();input.clear();facilities.dispose();facilityShadows.dispose();caustics.dispose();flavorPicker.dispose();sound.dispose();transport.dispose();localReflections.dispose();void renderer.setAnimationLoop(null);}};
+    }
+  }
+
+  public pauseGame(): void {
+    if (this.state === 'PLAYING') this.setState('PAUSED');
+  }
+
+  public resumeGame(): void {
+    if (this.state === 'PAUSED') {
+      this.sound.ensureContext();
+      this.setState('PLAYING');
+    }
+  }
+
+  public restartCurrentLevel(): void {
+    this.loadLevel(this.levelManager.currentLevelIndex);
+    this.startPlay();
+  }
+
+  public nextLevel(): void {
+    const nextIdx = this.levelManager.currentLevelIndex + 1;
+    if (nextIdx < this.levelManager.totalLevels) {
+      this.loadLevel(nextIdx);
+      this.startPlay();
+    } else {
+      this.setState('GAME_WON');
+      this.uiEvents.onGameWon({
+        totalTime: this.overallTimer,
+        totalTokens: this.totalTokensCollected,
+      });
+    }
+  }
+
+  private handleTrackComplete(): void {
+    if (this.state !== 'PLAYING') return;
+
+    this.sound.playVictory();
+    this.particles.emitFinishCelebration(this.physics.position);
+
+    const levelIdx = this.levelManager.currentLevelIndex;
+    const trackData = this.levelManager.currentTrackData!;
+
+    // Check & save best time
+    const oldBest = this.getBestTime(levelIdx);
+    const newBest = (oldBest === null || this.raceTimer < oldBest) ? this.raceTimer : oldBest;
+    this.saveBestTime(levelIdx, newBest);
+
+    const isLast = levelIdx >= this.levelManager.totalLevels - 1;
+
+    if (isLast) {
+      this.setState('GAME_WON');
+      this.uiEvents.onGameWon({
+        totalTime: this.overallTimer,
+        totalTokens: this.totalTokensCollected,
+      });
+    } else {
+      this.setState('LEVEL_COMPLETE');
+      this.uiEvents.onLevelComplete({
+        track: levelIdx + 1,
+        time: this.raceTimer,
+        tokens: this.collectedTokensInLevel,
+        totalTokens: this.totalTokensInLevel,
+        bestTime: newBest,
+        goldTime: trackData.goldTime,
+        silverTime: trackData.silverTime,
+      });
+    }
+  }
+
+  public setState(newState: GameState): void {
+    this.state = newState;
+    this.uiEvents.onStateChange(newState);
+  }
+
+  private getBestTime(levelIndex: number): number | null {
+    const val = localStorage.getItem(`greenway_rush_best_${levelIndex}`);
+    return val ? parseFloat(val) : null;
+  }
+
+  private saveBestTime(levelIndex: number, time: number): void {
+    localStorage.setItem(`greenway_rush_best_${levelIndex}`, String(time));
+  }
+
+  public startLoop(): void {
+    if (this.isRunning) return;
+    this.isRunning = true;
+    this.lastFrameTime = performance.now();
+
+    const loop = (currentTime: number) => {
+      if (!this.isRunning) return;
+      requestAnimationFrame(loop);
+
+      const deltaMs = currentTime - this.lastFrameTime;
+      this.lastFrameTime = currentTime;
+      const dt = Math.min(deltaMs / 1000, 0.05);
+
+      this.update(dt, currentTime * 0.001);
+      this.render();
+    };
+
+    requestAnimationFrame(loop);
+  }
+
+  public stopLoop(): void {
+    this.isRunning = false;
+  }
+
+  private update(dt: number, timeSec: number): void {
+    // Pause toggle
+    if (this.input.consumePause()) {
+      if (this.state === 'PLAYING') this.pauseGame();
+      else if (this.state === 'PAUSED') this.resumeGame();
+    }
+
+    // Manual respawn
+    if (this.input.consumeReset()) {
+      if (this.state === 'PLAYING') {
+        this.physics.reset(this.physics.lastSafePosition, this.physics.lastSafeHeading);
+        this.particles.emitRespawn(this.physics.position);
+        this.sound.playHazard();
+        this.uiEvents.onRespawn();
+      }
+    }
+
+    if (this.state === 'COUNTDOWN') {
+      this.tickCountdown(dt);
+      // Animate world but don't move car
+    }
+
+    if (this.state === 'PLAYING') {
+      this.raceTimer += dt;
+      this.overallTimer += dt;
+      this.uiEvents.onTimeUpdate(this.raceTimer);
+
+      // Read inputs
+      const mv = this.input.moveVector;
+      const throttle = mv.y;   // W/S
+      const steer = mv.x;      // A/D
+      const brakeInput = this.input.isBrakeHeld;
+
+      // Sub-step physics
+      const subSteps = 2;
+      const subDt = dt / subSteps;
+      for (let s = 0; s < subSteps; s++) {
+        this.physics.update(
+          subDt,
+          throttle,
+          steer,
+          brakeInput,
+          this.levelManager.boxes,
+          this.levelManager.hazards,
+          this.levelManager.boostPads,
+          this.levelManager.crystals,
+          this.levelManager.checkpoints,
+          this.levelManager.goal
+        );
+      }
+
+      // Speed HUD
+      this.uiEvents.onSpeedUpdate(this.physics.speedKmh);
+
+      // Engine sound
+      this.sound.updateEngine(
+        this.physics.velocity.length(),
+        this.physics.isGrounded,
+        throttle
+      );
+
+      // Dust particles when on ground
+      const speed = this.physics.velocity.length();
+      if (this.physics.isGrounded && speed > 2.0) {
+        this.particles.emitDust(this.physics.position, this.physics.velocity);
+      }
+
+      // Boost particles
+      if (this.physics.isBoostActive) {
+        const fwd = new THREE.Vector3(Math.sin(this.physics.heading), 0, Math.cos(this.physics.heading));
+        this.particles.emitBoost(
+          this.physics.position.clone().add(fwd.clone().multiplyScalar(-0.7)),
+          fwd
+        );
+      }
+
+      // Skid sound on drift
+      const driftMag = Math.abs(this.physics.steerAngle) * speed;
+      if (driftMag > 3.5 && timeSec - this.lastSkidTime > 0.4 && this.physics.isGrounded) {
+        this.sound.playSkid();
+        this.lastSkidTime = timeSec;
+      }
+
+      // Boost UI notification
+      if (this.physics.isBoostActive !== this.boostWasActive) {
+        this.uiEvents.onBoostActive(this.physics.isBoostActive);
+        this.boostWasActive = this.physics.isBoostActive;
+      }
+    } else {
+      this.sound.updateEngine(0, false, 0);
+    }
+
+    // Always update scene & camera
+    this.levelManager.update(timeSec);
+    this.particles.update(dt);
+
+    const brakeInput = this.state === 'PLAYING' ? this.input.isBrakeHeld : false;
+    this.vehicleMesh.update(this.physics, timeSec, brakeInput);
+
+    this.cameraController.update(
+      this.physics.position,
+      this.physics.heading,
+      this.physics.forwardSpeed,
+      dt
+    );
+  }
+
+  private render(): void {
+    this.renderer.render(this.scene, this.camera);
+  }
+}
+
+export function startGame(viewportEl: HTMLElement, uiEvents: GameUIEvents): GameRuntime {
+  const runtime = new GameRuntime(viewportEl, uiEvents);
+  runtime.startLoop();
+  return runtime;
 }

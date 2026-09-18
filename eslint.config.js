@@ -8,7 +8,7 @@ export default tseslint.config(
     files:['src/**/*.ts'],
     languageOptions:{parser:tseslint.parser,parserOptions:{project:'./tsconfig.json'}},
     plugins:{'@typescript-eslint':tseslint.plugin},
-    rules:{'no-undef':'off','no-unused-vars':'off','@typescript-eslint/no-unused-vars':'error'},
+    rules:{'no-undef':'off','no-unused-vars':'off','@typescript-eslint/no-unused-vars':['error',{varsIgnorePattern:'^_',argsIgnorePattern:'^_'}]},
   },
   {
     files:['src/**/*.js'],
