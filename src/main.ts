@@ -73,6 +73,8 @@ appEl.innerHTML = `
       <span class="hint-sep"></span>
       <div class="hint-group"><kbd>SPACE</kbd><span class="hint-label">Brake</span></div>
       <span class="hint-sep"></span>
+      <div class="hint-group"><kbd>N</kbd><span class="hint-label">Nitro</span></div>
+      <span class="hint-sep"></span>
       <div class="hint-group"><kbd>R</kbd><span class="hint-label">Respawn</span></div>
     </footer>
   </div>
@@ -88,10 +90,16 @@ appEl.innerHTML = `
       <span class="joystick-track"></span>
       <span class="joystick-knob"></span>
     </button>
-    <button class="brake-btn" data-control="Space" type="button" aria-label="Brake">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5"><path d="M19 12H5"/><path d="M12 5l-7 7 7 7"/></svg>
-      <span>BRAKE</span>
-    </button>
+    <div class="touch-action-buttons">
+      <button class="brake-btn" data-control="Brake" type="button" aria-label="Brake">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5"><path d="M19 12H5"/><path d="M12 5l-7 7 7 7"/></svg>
+        <span>BRAKE</span>
+      </button>
+      <button class="nitro-btn" data-control="Nitro" type="button" aria-label="Nitro">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        <span>NITRO</span>
+      </button>
+    </div>
   </div>
 
   <!-- ═══════════════════════════════════════════ MAIN MENU ══ -->
@@ -341,6 +349,9 @@ game = startGame(document.querySelector<HTMLElement>('#viewport')!, {
     modalVictory.classList.toggle('active', state === 'GAME_WON');
   },
 });
+
+// ─── Init touch controls (must run after HTML is in the DOM) ─────────────────
+game.input.initTouchControls();
 
 // ─── Track selector ───────────────────────────────────────────────────────────
 trackBtns.forEach(btn => {

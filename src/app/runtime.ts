@@ -356,6 +356,7 @@ export class GameRuntime {
       const throttle = mv.y;   // W/S
       const steer = mv.x;      // A/D
       const brakeInput = this.input.isBrakeHeld;
+      const nitroInput = this.input.isNitroActive;
 
       // Sub-step physics
       const subSteps = 2;
@@ -366,6 +367,7 @@ export class GameRuntime {
           throttle,
           steer,
           brakeInput,
+          nitroInput,
           this.levelManager.boxes,
           this.levelManager.hazards,
           this.levelManager.boostPads,
@@ -399,6 +401,19 @@ export class GameRuntime {
           fwd
         );
       }
+
+      // Nitro particles — purple-tinted boost trail while nitro is held
+      if (nitroInput && this.physics.isGrounded) {
+        const fwd = new THREE.Vector3(Math.sin(this.physics.heading), 0, Math.cos(this.physics.heading));
+        this.particles.emitBoost(
+          this.physics.position.clone().add(fwd.clone().multiplyScalar(-0.9)),
+          fwd
+        );
+      }
+
+      // Nitro button glow feedback
+      const nitroBtn = document.querySelector<HTMLButtonElement>('[data-control="Nitro"]');
+      if (nitroBtn) nitroBtn.classList.toggle('firing', nitroInput);
 
       // Skid sound on drift
       const driftMag = Math.abs(this.physics.steerAngle) * speed;

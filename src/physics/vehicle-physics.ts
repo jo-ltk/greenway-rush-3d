@@ -117,6 +117,7 @@ export class VehiclePhysics {
     throttle:   number,       // -1..1  (W=+1, S=-1)
     steer:      number,       // -1..1  (A=-1, D=+1)
     brakeInput: boolean,      // Space
+    nitroInput: boolean,      // Nitro button — instant speed jet
     boxes:       AABBCollider[],
     obstacles:   MovingHazardCollider[],
     boostPads:   BoostPadCollider[],
@@ -224,7 +225,7 @@ export class VehiclePhysics {
       this.driftFactor  += (driftTarget - this.driftFactor) * clampedDt * (brakeInput ? 5.0 : 2.0);
 
       // ── Engine — INCREASED SPEED ──
-      // Normal:  ~26 m/s ≈ 94 km/h   Boost: ~38 m/s ≈ 137 km/h
+      // Normal:  ~26 m/s ≈ 94 km/h   Boost: ~38 m/s ≈ 137 km/h  Nitro jet: instant push
       const maxSpeed = this.isBoostActive ? 38.0 : 26.0;
       const accel    = this.isBoostActive ? 95.0 : 68.0;
       const brakeForce = brakeInput ? 35.0 : 0.0;
@@ -240,6 +241,18 @@ export class VehiclePhysics {
       }
 
       this.velocity.addScaledVector(forward, this.engineForce * clampedDt);
+
+      // Nitro jet — instant forward impulse, bypasses normal max-speed cap
+      if (nitroInput) {
+        const nitroAccel = 180.0; // strong burst
+        this.velocity.addScaledVector(forward, nitroAccel * clampedDt);
+        // Hard-cap so it doesn't go completely insane
+        const nitroMaxSpeed = 55.0;
+        const currentFwdSpeed = this.velocity.dot(forward);
+        if (currentFwdSpeed > nitroMaxSpeed) {
+          this.velocity.addScaledVector(forward, nitroMaxSpeed - currentFwdSpeed);
+        }
+      }
 
       // Braking / rolling drag
       if (brakeInput || Math.abs(throttle) < 0.05) {
